@@ -56,7 +56,7 @@ export function Login() {
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="admin@novaplus.com"
+                placeholder="admin@gmail.com"
                 required
                 disabled={loading}
                 autoComplete="email"
