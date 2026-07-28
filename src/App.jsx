@@ -3,6 +3,8 @@ import React, { useState } from 'react'
 import { useAuth } from './context/AuthContext'
 import { AdminProvider, useAdmin } from './context/AdminContext'
 import { Login } from './components/Login'
+import { BroadcastPanel } from './components/BroadcastPanel'
+import { PriceManagement } from './components/PriceManagement'
 import './index.css'
 import {
   LayoutDashboard,
@@ -37,7 +39,8 @@ import {
   Copy,
   Filter,
   Download,
-  Tag, // <- ADD THIS MISSING IMPORT
+  Tag,
+  DollarSign,  // ADD THIS
 } from 'lucide-react'
 import {
   ResponsiveContainer,
@@ -63,6 +66,7 @@ const NAV_ITEMS = [
   { key: 'users', label: 'Users', icon: Users },
   { key: 'orders', label: 'Orders', icon: Package },
   { key: 'coupons', label: 'Coupons', icon: Tag },
+  { key: 'prices', label: 'Prices', icon: DollarSign },  // ADD THIS
   { key: 'referrals', label: 'Referrals', icon: Share2 },
   { key: 'broadcast', label: 'Broadcast', icon: Send },
   { key: 'settings', label: 'Settings', icon: SettingsIcon },
@@ -142,6 +146,22 @@ function Toggle({ checked, onChange, label, description }) {
         <ToggleLeft className="toggle-row__icon" size={32} />
       )}
     </button>
+  )
+}
+
+function Modal({ title, onClose, children }) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal__header">
+          <h3>{title}</h3>
+          <button className="modal__close" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+        <div className="modal__body">{children}</div>
+      </div>
+    </div>
   )
 }
 
@@ -417,8 +437,12 @@ function UsersPanel() {
 // ============================================
 
 function OrdersPanel() {
-  const { orders, refresh, updateOrderStatus } = useAdmin()
+  const { orders, refresh, updateOrderStatus, rejectOrder } = useAdmin()
   const [filter, setFilter] = useState('all')
+  const [busyId, setBusyId] = useState(null)
+  const [rejectTarget, setRejectTarget] = useState(null)
+  const [rejectReason, setRejectReason] = useState('')
+  const [rejecting, setRejecting] = useState(false)
 
   const filteredOrders = filter === 'all' 
     ? orders 
@@ -430,7 +454,33 @@ function OrdersPanel() {
   }))
 
   const handleStatusChange = async (orderId, status) => {
-    await updateOrderStatus(orderId, status)
+    setBusyId(orderId)
+    try {
+      await updateOrderStatus(orderId, status)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const openRejectModal = (order) => {
+    setRejectReason('')
+    setRejectTarget(order)
+  }
+
+  const closeRejectModal = () => {
+    if (rejecting) return
+    setRejectTarget(null)
+  }
+
+  const confirmReject = async () => {
+    if (!rejectTarget) return
+    setRejecting(true)
+    try {
+      await rejectOrder(rejectTarget.id, rejectReason.trim())
+      setRejectTarget(null)
+    } finally {
+      setRejecting(false)
+    }
   }
 
   return (
@@ -500,17 +550,29 @@ function OrdersPanel() {
                     <td className="text-right">
                       {o.status === 'pending' && (
                         <div className="row-actions">
-                          <button className="btn btn-primary" onClick={() => handleStatusChange(o.id, 'approved')}>
-                            Approve
+                          <button
+                            className="btn btn-primary"
+                            disabled={busyId === o.id}
+                            onClick={() => handleStatusChange(o.id, 'approved')}
+                          >
+                            {busyId === o.id ? 'Approving...' : 'Approve'}
                           </button>
-                          <button className="btn btn-outline" onClick={() => handleStatusChange(o.id, 'rejected')}>
+                          <button
+                            className="btn btn-outline btn-danger"
+                            disabled={busyId === o.id}
+                            onClick={() => openRejectModal(o)}
+                          >
                             Reject
                           </button>
                         </div>
                       )}
                       {o.status === 'approved' && (
-                        <button className="btn btn-primary" onClick={() => handleStatusChange(o.id, 'completed')}>
-                          Complete
+                        <button
+                          className="btn btn-primary"
+                          disabled={busyId === o.id}
+                          onClick={() => handleStatusChange(o.id, 'completed')}
+                        >
+                          {busyId === o.id ? 'Completing...' : 'Complete'}
                         </button>
                       )}
                     </td>
@@ -521,6 +583,33 @@ function OrdersPanel() {
           </table>
         </div>
       </Card>
+
+      {rejectTarget && (
+        <Modal title={`Reject Order #${rejectTarget.id}`} onClose={closeRejectModal}>
+          <p className="modal__hint">
+            This user will be notified by Telegram DM. Adding a reason helps them understand why —
+            it's optional but recommended.
+          </p>
+          <div className="form-field">
+            <label className="form-field__label">Reason (optional)</label>
+            <textarea
+              rows={4}
+              value={rejectReason}
+              onChange={(e) => setRejectReason(e.target.value)}
+              placeholder="e.g. Payment screenshot didn't match the amount ordered"
+              autoFocus
+            />
+          </div>
+          <div className="modal__actions">
+            <button className="btn btn-outline" onClick={closeRejectModal} disabled={rejecting}>
+              Cancel
+            </button>
+            <button className="btn btn-danger" onClick={confirmReject} disabled={rejecting}>
+              {rejecting ? 'Rejecting...' : 'Confirm Reject'}
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   )
 }
@@ -738,95 +827,6 @@ function ReferralsPanel() {
 }
 
 // ============================================
-// BROADCAST COMPONENT
-// ============================================
-
-function BroadcastPanel() {
-  const [text, setText] = useState('')
-  const [photoFileId, setPhotoFileId] = useState('')
-  const [sending, setSending] = useState(false)
-  const [progress, setProgress] = useState(0)
-  const [result, setResult] = useState(null)
-  const { api } = useAdmin()
-
-  const handleSend = async () => {
-    if (!text.trim()) return
-    
-    setSending(true)
-    setProgress(0)
-    setResult(null)
-    
-    try {
-      const response = await api.sendBroadcastMessage(text, photoFileId, null, (pct) => setProgress(pct))
-      setResult(response)
-    } catch (error) {
-      setResult({ sent: 0, failed: 1, total: 1, error: error.message })
-    } finally {
-      setSending(false)
-    }
-  }
-
-  return (
-    <div className="broadcast-panel">
-      <Card>
-        <SectionHeading eyebrow="Send" title="Broadcast Message" />
-        
-        <div className="broadcast-form">
-          <div className="form-field">
-            <label>Message Text</label>
-            <textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Enter your broadcast message here..."
-              rows={6}
-            />
-          </div>
-          
-          <div className="form-field">
-            <label>Photo File ID (optional)</label>
-            <input
-              value={photoFileId}
-              onChange={(e) => setPhotoFileId(e.target.value)}
-              placeholder="Telegram photo file ID"
-            />
-          </div>
-          
-          <div className="broadcast-actions">
-            <button 
-              className="btn btn-primary" 
-              onClick={handleSend}
-              disabled={sending || !text.trim()}
-            >
-              {sending ? 'Sending...' : 'Send Broadcast'}
-            </button>
-          </div>
-          
-          {sending && (
-            <div className="progress-bar">
-              <div className="progress-fill" style={{ width: `${progress}%` }} />
-              <span>{progress}%</span>
-            </div>
-          )}
-          
-          {result && (
-            <div className={`broadcast-result ${result.error ? 'error' : 'success'}`}>
-              {result.error ? (
-                <p>❌ Error: {result.error}</p>
-              ) : (
-                <p>
-                  ✅ Broadcast complete!<br />
-                  Sent: {result.sent} | Failed: {result.failed} | Total: {result.total}
-                </p>
-              )}
-            </div>
-          )}
-        </div>
-      </Card>
-    </div>
-  )
-}
-
-// ============================================
 // SETTINGS COMPONENT
 // ============================================
 
@@ -937,6 +937,7 @@ function DashboardContent() {
       case 'users': return <UsersPanel />
       case 'orders': return <OrdersPanel />
       case 'coupons': return <CouponsPanel />
+      case 'prices': return <PriceManagement />
       case 'referrals': return <ReferralsPanel />
       case 'broadcast': return <BroadcastPanel />
       case 'settings': return <SettingsPanel />
