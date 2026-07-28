@@ -1,5 +1,5 @@
 // src/services/api.js
-import { supabase, SETTINGS_KEYS } from '../lib/supabase'
+import { supabase } from '../lib/supabase'
 
 // Cache TTLs
 const STATS_CACHE_TTL = 15000
@@ -7,6 +7,7 @@ const USERS_CACHE_TTL = 30000
 const ORDERS_CACHE_TTL = 10000
 const COUPONS_CACHE_TTL = 30000
 const SETTINGS_CACHE_TTL = 30000
+const PRICES_CACHE_TTL = 30000
 
 // In-memory cache
 class Cache {
@@ -27,9 +28,70 @@ class Cache {
     if (key) this.store.delete(key)
     else this.store.clear()
   }
+
+  // Deletes every cached entry whose key starts with `prefix`.
+  // Needed for keys like `users_${limit}_${offset}` where the caller
+  // only knows the prefix ('users_') and not the exact cached key.
+  invalidatePrefix(prefix) {
+    for (const key of this.store.keys()) {
+      if (key.startsWith(prefix)) this.store.delete(key)
+    }
+  }
 }
 
 const cache = new Cache()
+
+// Sleep utility for rate limiting
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+
+// Default prices
+const DEFAULT_PRICES = {
+  gemini: { priceInBirr: 350 },
+  premium: {
+    "1m": { priceInBirr: 800 },
+    "3m": { priceInBirr: 2390 },
+    "6m": { priceInBirr: 3190 },
+    "1y": { priceInBirr: 5690 },
+    "1y2": { priceInBirr: 5100 }
+  },
+  stars: { pricePerStar: 3.25 }
+}
+
+async function getProductPrices() {
+  const { data, error } = await supabase
+    .from('bot_settings')
+    .select('value')
+    .eq('key', 'product_prices')
+    .limit(1)
+
+  if (error) throw error
+  
+  if (data && data.length > 0) {
+    try {
+      const parsed = JSON.parse(data[0].value)
+      // Merge with defaults to handle missing keys
+      return { ...DEFAULT_PRICES, ...parsed }
+    } catch (e) { /* use default */ }
+  }
+  
+  return { ...DEFAULT_PRICES }
+}
+
+async function saveProductPrices(prices) {
+  const { error } = await supabase
+    .from('bot_settings')
+    .upsert(
+      { key: 'product_prices', value: JSON.stringify(prices) },
+      { onConflict: 'key' }
+    )
+  
+  if (error) throw error
+  
+  // Invalidate all price caches
+  cache.invalidate('price_gemini')
+  cache.invalidate('price_premium')
+  cache.invalidate('price_stars')
+}
 
 export const api = {
   // ============================================
@@ -117,6 +179,77 @@ export const api = {
   },
 
   // ============================================
+  // PRICE MANAGEMENT
+  // ============================================
+
+  async getGeminiPrice() {
+    const cacheKey = 'price_gemini'
+    const cached = cache.get(cacheKey)
+    if (cached) return cached
+
+    const prices = await getProductPrices()
+    const result = prices.gemini?.priceInBirr || DEFAULT_PRICES.gemini.priceInBirr
+    cache.set(cacheKey, result, PRICES_CACHE_TTL)
+    return result
+  },
+
+  async getPremiumPrices() {
+    const cacheKey = 'price_premium'
+    const cached = cache.get(cacheKey)
+    if (cached) return cached
+
+    const prices = await getProductPrices()
+    const result = prices.premium || DEFAULT_PRICES.premium
+    cache.set(cacheKey, result, PRICES_CACHE_TTL)
+    return result
+  },
+
+  async getStarsPrice() {
+    const cacheKey = 'price_stars'
+    const cached = cache.get(cacheKey)
+    if (cached) return cached
+
+    const prices = await getProductPrices()
+    const result = prices.stars?.pricePerStar || DEFAULT_PRICES.stars.pricePerStar
+    cache.set(cacheKey, result, PRICES_CACHE_TTL)
+    return result
+  },
+
+  async getAllPrices() {
+    const prices = await getProductPrices()
+    return {
+      gemini: prices.gemini?.priceInBirr || DEFAULT_PRICES.gemini.priceInBirr,
+      premium: prices.premium || DEFAULT_PRICES.premium,
+      stars: prices.stars?.pricePerStar || DEFAULT_PRICES.stars.pricePerStar
+    }
+  },
+
+  async updateGeminiPrice(priceInBirr) {
+    const prices = await getProductPrices()
+    if (!prices.gemini) prices.gemini = {}
+    prices.gemini.priceInBirr = priceInBirr
+    await saveProductPrices(prices)
+    return true
+  },
+
+  async updatePremiumPrice(durationKey, priceInBirr) {
+    const prices = await getProductPrices()
+    if (!prices.premium) prices.premium = {}
+    if (!prices.premium[durationKey]) prices.premium[durationKey] = {}
+    prices.premium[durationKey].priceInBirr = priceInBirr
+    await saveProductPrices(prices)
+    return true
+  },
+
+  async updateStarsPrice(pricePerStar) {
+    const prices = await getProductPrices()
+    if (!prices.stars) prices.stars = {}
+    prices.stars.pricePerStar = pricePerStar
+    await saveProductPrices(prices)
+    return true
+  },
+
+  // ============================================
   // USERS
   // ============================================
 
@@ -178,7 +311,7 @@ export const api = {
       .eq('user_id', String(userId))
 
     if (error) throw error
-    cache.invalidate('users_')
+    cache.invalidatePrefix('users_')
     return true
   },
 
@@ -228,7 +361,7 @@ export const api = {
     if (error) throw error
     
     cache.invalidate('dashboard_stats')
-    cache.invalidate('orders_')
+    cache.invalidatePrefix('orders_')
     return true
   },
 
@@ -288,7 +421,7 @@ export const api = {
     const { data, error } = await supabase
       .from('coupons')
       .insert([{
-        code: couponData.code,
+        code: couponData.code.toUpperCase(),
         discount_percent: couponData.discount_percent,
         max_uses: couponData.max_uses || 0,
         used_count: 0,
@@ -452,43 +585,123 @@ export const api = {
   // BROADCAST
   // ============================================
 
-  async getAllUserIds() {
+  async getAllUsers() {
     const { data, error } = await supabase
       .from('users')
-      .select('user_id')
+      .select('user_id, name, username')
 
     if (error) throw error
     return data || []
   },
 
-  async sendBroadcastMessage(text, photoFileId = null, keyboard = null, onProgress = null) {
-    const users = await this.getAllUserIds()
-    let sent = 0
-    let failed = 0
-
-    for (let i = 0; i < users.length; i++) {
-      const user = users[i]
-      try {
-        if (photoFileId) {
-          await supabase.functions.invoke('send-photo', {
-            body: { userId: user.user_id, photoFileId, caption: text, keyboard }
-          })
-        } else {
-          await supabase.functions.invoke('send-message', {
-            body: { userId: user.user_id, text, keyboard }
-          })
+  async notifyUser(userId, message, parseMode = 'HTML') {
+    try {
+      const { error } = await supabase.functions.invoke('send-telegram-message', {
+        body: {
+          userId: String(userId),
+          text: message,
+          parseMode
         }
-        sent++
-      } catch {
-        failed++
-      }
+      })
+      
+      if (error) throw error
+      return true
+    } catch (err) {
+      console.error('Failed to notify user:', err)
+      throw err
+    }
+  },
 
-      if (onProgress) {
-        onProgress(Math.round(((i + 1) / users.length) * 100), { sent, failed, total: users.length })
-      }
+  async sendBroadcastMessage(text, photoFileId = null, keyboard = null, onProgress = null, options = {}) {
+    const { parseMode = 'HTML', speed = 8 } = options
+    
+    if (!text && !photoFileId) {
+      throw new Error('Message or photo must be provided')
     }
 
-    return { sent, failed, total: users.length }
+    try {
+      const users = await this.getAllUsers()
+      
+      if (users.length === 0) {
+        return { sent: 0, failed: 0, total: 0, error: 'No users to broadcast to' }
+      }
+
+      let sent = 0
+      let failed = 0
+      let firstErrorMessage = null
+      const totalUsers = users.length
+      const delayMs = Math.max(125, Math.round(1000 / speed))
+
+      for (let i = 0; i < users.length; i++) {
+        const user = users[i]
+        
+        try {
+          if (photoFileId) {
+            let personalizedText = text
+              .replace(/{user_name}/g, user.name || 'User')
+              .replace(/{username}/g, user.username ? `@${user.username}` : '@unknown')
+              .replace(/{user_id}/g, user.user_id)
+
+            const { error: fnError } = await supabase.functions.invoke('send-telegram-photo', {
+              body: {
+                userId: String(user.user_id),
+                photoFileId,
+                caption: personalizedText,
+                parseMode,
+                keyboard
+              }
+            })
+            if (fnError) throw fnError
+          } else {
+            let personalizedText = text
+              .replace(/{user_name}/g, user.name || 'User')
+              .replace(/{username}/g, user.username ? `@${user.username}` : '@unknown')
+              .replace(/{user_id}/g, user.user_id)
+
+            const { error: fnError } = await supabase.functions.invoke('send-telegram-message', {
+              body: {
+                userId: String(user.user_id),
+                text: personalizedText,
+                parseMode,
+                keyboard
+              }
+            })
+            if (fnError) throw fnError
+          }
+          
+          sent++
+        } catch (error) {
+          console.error(`Failed to send to user ${user.user_id}:`, error)
+          failed++
+          if (!firstErrorMessage) {
+            firstErrorMessage = error?.context
+              ? `${error.message} (status ${error.context.status})`
+              : (error?.message || String(error))
+          }
+        }
+
+        const progress = Math.round(((i + 1) / totalUsers) * 100)
+        if (onProgress) {
+          onProgress(progress, { sent, failed, total: totalUsers })
+        }
+
+        if (i < users.length - 1) {
+          await sleep(delayMs)
+        }
+      }
+
+      return {
+        sent,
+        failed,
+        total: totalUsers,
+        ...(failed > 0 && sent === 0 && firstErrorMessage
+          ? { error: `All sends failed. First error: ${firstErrorMessage}` }
+          : {})
+      }
+    } catch (error) {
+      console.error('Broadcast error:', error)
+      throw error
+    }
   },
 
   // ============================================
