@@ -15,8 +15,11 @@ export function AdminProvider({ children }) {
   const [activity, setActivity] = useState([])
   const [prices, setPrices] = useState({
     gemini: null,
+    coursera: null,
+    courseraInStock: true,
     premium: {},
     stars: null,
+    airtime: { data: {}, voice: {} },
     loading: true
   })
   const [loading, setLoading] = useState(true)
@@ -29,7 +32,11 @@ export function AdminProvider({ children }) {
       setRefreshing(true)
       setError(null)
 
-      const [statsData, usersData, ordersData, pendingData, couponsData, referrersData, settingsData, activityData, geminiPrice, premiumPrices, starsPrice] = 
+      const [
+        statsData, usersData, ordersData, pendingData, couponsData, referrersData,
+        settingsData, activityData, geminiPrice, premiumPrices, starsPrice,
+        courseraPrice, courseraInStock, airtimeData, airtimeVoice,
+      ] = 
         await Promise.all([
           api.getDashboardStats(),
           api.getUsers(100, 0),
@@ -41,7 +48,11 @@ export function AdminProvider({ children }) {
           api.getActivityStats(7),
           api.getGeminiPrice(),
           api.getPremiumPrices(),
-          api.getStarsPrice()
+          api.getStarsPrice(),
+          api.getCourseraPrice(),
+          api.getCourseraStock(),
+          api.getAirtimeDataPrices(),
+          api.getAirtimeVoicePrices(),
         ])
 
       setStats(statsData)
@@ -54,8 +65,11 @@ export function AdminProvider({ children }) {
       setActivity(activityData)
       setPrices({
         gemini: geminiPrice,
+        coursera: courseraPrice,
+        courseraInStock,
         premium: premiumPrices,
         stars: starsPrice,
+        airtime: { data: airtimeData, voice: airtimeVoice },
         loading: false
       })
     } catch (err) {
@@ -149,6 +163,48 @@ export function AdminProvider({ children }) {
       return true
     } catch (err) {
       setError(`Failed to update Stars price: ${err.message}`)
+      throw err
+    }
+  }, [])
+
+  const updateCourseraPrice = useCallback(async (price) => {
+    try {
+      await api.updateCourseraPrice(price)
+      setPrices(prev => ({ ...prev, coursera: price }))
+      return true
+    } catch (err) {
+      setError(`Failed to update Coursera price: ${err.message}`)
+      throw err
+    }
+  }, [])
+
+  const updateCourseraStock = useCallback(async (inStock) => {
+    try {
+      await api.updateCourseraStock(inStock)
+      setPrices(prev => ({ ...prev, courseraInStock: inStock }))
+      return true
+    } catch (err) {
+      setError(`Failed to update Coursera stock: ${err.message}`)
+      throw err
+    }
+  }, [])
+
+  const updateAirtimePrice = useCallback(async (category, durationKey, price) => {
+    try {
+      await api.updateAirtimePrice(category, durationKey, price)
+      setPrices(prev => ({
+        ...prev,
+        airtime: {
+          ...prev.airtime,
+          [category]: {
+            ...prev.airtime[category],
+            [durationKey]: { ...prev.airtime[category]?.[durationKey], priceInBirr: price }
+          }
+        }
+      }))
+      return true
+    } catch (err) {
+      setError(`Failed to update Airtime price: ${err.message}`)
       throw err
     }
   }, [])
@@ -263,6 +319,21 @@ export function AdminProvider({ children }) {
         throw err
       }
     },
+    // Coursera delivery is manual: approving sets the order to 'approved'
+    // and DMs the account email/password straight from the dashboard,
+    // instead of the admin having to switch to Telegram chat to type them
+    // (see handlers/coursera.js's pendingCourseraCredentials flow).
+    approveCourseraOrder: async (orderId, email, password) => {
+      try {
+        const order = findOrder(orderId)
+        await api.updateOrderStatus(orderId, 'approved')
+        await api.sendCourseraCredentials(order, email, password)
+        await refresh()
+      } catch (err) {
+        setError(`Failed to approve Coursera order: ${err.message}`)
+        throw err
+      }
+    },
     createCoupon: async (couponData) => {
       try {
         const newCoupon = await api.createCoupon(couponData)
@@ -284,8 +355,11 @@ export function AdminProvider({ children }) {
     },
     // Price management methods
     updateGeminiPrice,
+    updateCourseraPrice,
+    updateCourseraStock,
     updatePremiumPrice,
     updateStarsPrice,
+    updateAirtimePrice,
     markNotificationRead: (id) => {
       setNotifications(prev => prev.map(n => 
         n.id === id ? { ...n, read: true } : n
