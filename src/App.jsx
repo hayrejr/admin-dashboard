@@ -6,6 +6,7 @@ import { Login } from './components/Login'
 import { BroadcastPanel } from './components/BroadcastPanel'
 import { PriceManagement } from './components/PriceManagement'
 import './index.css'
+import './App.css'
 import {
   LayoutDashboard,
   Users,
@@ -41,6 +42,10 @@ import {
   Download,
   Tag,
   DollarSign,  // ADD THIS
+  GraduationCap,
+  Eye,
+  EyeOff,
+  KeyRound,
 } from 'lucide-react'
 import {
   ResponsiveContainer,
@@ -81,6 +86,7 @@ const SERVICE_META = {
   telegram_premium: { label: 'Telegram Premium', icon: Send, color: '#3B82F6' },
   telegram_stars: { label: 'Telegram Stars', icon: Star, color: '#60A5FA' },
   usdt_sell: { label: 'USDT Sell', icon: Wallet, color: '#1D4ED8' },
+  coursera: { label: 'Coursera Plus', icon: GraduationCap, color: '#0EA5E9' },
 }
 
 const STATUS_META = {
@@ -437,12 +443,18 @@ function UsersPanel() {
 // ============================================
 
 function OrdersPanel() {
-  const { orders, refresh, updateOrderStatus, rejectOrder } = useAdmin()
+  const { orders, refresh, updateOrderStatus, rejectOrder, approveCourseraOrder } = useAdmin()
   const [filter, setFilter] = useState('all')
   const [busyId, setBusyId] = useState(null)
   const [rejectTarget, setRejectTarget] = useState(null)
   const [rejectReason, setRejectReason] = useState('')
   const [rejecting, setRejecting] = useState(false)
+  const [credsTarget, setCredsTarget] = useState(null)
+  const [credsEmail, setCredsEmail] = useState('')
+  const [credsPassword, setCredsPassword] = useState('')
+  const [credsShowPassword, setCredsShowPassword] = useState(false)
+  const [credsSaving, setCredsSaving] = useState(false)
+  const [credsError, setCredsError] = useState(null)
 
   const filteredOrders = filter === 'all' 
     ? orders 
@@ -465,6 +477,45 @@ function OrdersPanel() {
   const openRejectModal = (order) => {
     setRejectReason('')
     setRejectTarget(order)
+  }
+
+  const openCredsModal = (order) => {
+    setCredsEmail('')
+    setCredsPassword('')
+    setCredsShowPassword(false)
+    setCredsError(null)
+    setCredsTarget(order)
+  }
+
+  const closeCredsModal = () => {
+    if (credsSaving) return
+    setCredsTarget(null)
+  }
+
+  const confirmCreds = async () => {
+    if (!credsTarget) return
+    const email = credsEmail.trim()
+    const password = credsPassword.trim()
+
+    if (!email.includes('@') || !email.includes('.')) {
+      setCredsError('Enter a valid email address.')
+      return
+    }
+    if (!password) {
+      setCredsError('Enter the account password.')
+      return
+    }
+
+    setCredsSaving(true)
+    setCredsError(null)
+    try {
+      await approveCourseraOrder(credsTarget.id, email, password)
+      setCredsTarget(null)
+    } catch (err) {
+      setCredsError(err.message || 'Failed to approve order')
+    } finally {
+      setCredsSaving(false)
+    }
   }
 
   const closeRejectModal = () => {
@@ -550,13 +601,23 @@ function OrdersPanel() {
                     <td className="text-right">
                       {o.status === 'pending' && (
                         <div className="row-actions">
-                          <button
-                            className="btn btn-primary"
-                            disabled={busyId === o.id}
-                            onClick={() => handleStatusChange(o.id, 'approved')}
-                          >
-                            {busyId === o.id ? 'Approving...' : 'Approve'}
-                          </button>
+                          {o.order_type === 'coursera' ? (
+                            <button
+                              className="btn btn-primary"
+                              onClick={() => openCredsModal(o)}
+                            >
+                              <KeyRound size={14} />
+                              Enter Details
+                            </button>
+                          ) : (
+                            <button
+                              className="btn btn-primary"
+                              disabled={busyId === o.id}
+                              onClick={() => handleStatusChange(o.id, 'approved')}
+                            >
+                              {busyId === o.id ? 'Approving...' : 'Approve'}
+                            </button>
+                          )}
                           <button
                             className="btn btn-outline btn-danger"
                             disabled={busyId === o.id}
@@ -606,6 +667,55 @@ function OrdersPanel() {
             </button>
             <button className="btn btn-danger" onClick={confirmReject} disabled={rejecting}>
               {rejecting ? 'Rejecting...' : 'Confirm Reject'}
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {credsTarget && (
+        <Modal title={`Coursera Order #${credsTarget.id} — Account Details`} onClose={closeCredsModal}>
+          <p className="modal__hint">
+            Enter the Coursera account email and password for this user. Approving will mark the
+            order as approved and DM these credentials to the user immediately.
+          </p>
+          <div className="form-field">
+            <label className="form-field__label">Coursera Email</label>
+            <input
+              type="email"
+              value={credsEmail}
+              onChange={(e) => setCredsEmail(e.target.value)}
+              placeholder="user@example.com"
+              autoFocus
+              disabled={credsSaving}
+            />
+          </div>
+          <div className="form-field">
+            <label className="form-field__label">Coursera Password</label>
+            <div className="password-input-wrapper">
+              <input
+                type={credsShowPassword ? 'text' : 'password'}
+                value={credsPassword}
+                onChange={(e) => setCredsPassword(e.target.value)}
+                placeholder="Account password"
+                disabled={credsSaving}
+              />
+              <button
+                type="button"
+                className="password-toggle"
+                onClick={() => setCredsShowPassword(!credsShowPassword)}
+                aria-label={credsShowPassword ? 'Hide password' : 'Show password'}
+              >
+                {credsShowPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+          </div>
+          {credsError && <p className="field-error">{credsError}</p>}
+          <div className="modal__actions">
+            <button className="btn btn-outline" onClick={closeCredsModal} disabled={credsSaving}>
+              Cancel
+            </button>
+            <button className="btn btn-primary" onClick={confirmCreds} disabled={credsSaving}>
+              {credsSaving ? 'Sending…' : 'Approve & Send'}
             </button>
           </div>
         </Modal>
