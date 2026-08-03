@@ -44,9 +44,12 @@ const cache = new Cache()
 // Sleep utility for rate limiting
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
 
-// Default prices
+// Default prices — mirrors handlers/priceConfig.js DEFAULT_PRICES on the bot
+// side, so the dashboard never shows blank/undefined values before the
+// first real fetch resolves.
 const DEFAULT_PRICES = {
   gemini: { priceInBirr: 350 },
+  coursera: { priceInBirr: 165, inStock: true },
   premium: {
     "1m": { priceInBirr: 800 },
     "3m": { priceInBirr: 2390 },
@@ -54,7 +57,30 @@ const DEFAULT_PRICES = {
     "1y": { priceInBirr: 5690 },
     "1y2": { priceInBirr: 5100 }
   },
-  stars: { pricePerStar: 3.25 }
+  stars: { pricePerStar: 3.25 },
+  airtime: {
+    data: {
+      "1wd": { priceInBirr: 550 },
+      "1wdb": { priceInBirr: 600 },
+      "1md": { priceInBirr: 1750 },
+      "1mdb": { priceInBirr: 1850 },
+      "1mdv": { priceInBirr: 2400 },
+    },
+    voice: {
+      "1mv": { priceInBirr: 1000 },
+      "1mvd": { priceInBirr: 2400 },
+    },
+  },
+}
+
+// Basic HTML-escaping for values interpolated into Telegram HTML-parse-mode
+// messages (credential delivery). Keeps a stray "<" or "&" in a password
+// from breaking the message or being interpreted as markup.
+function escapeHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
 }
 
 async function getProductPrices() {
@@ -69,12 +95,29 @@ async function getProductPrices() {
   if (data && data.length > 0) {
     try {
       const parsed = JSON.parse(data[0].value)
-      // Merge with defaults to handle missing keys
-      return { ...DEFAULT_PRICES, ...parsed }
+      // Deep-merge with defaults so a stored blob missing a newer key
+      // (e.g. coursera, airtime) falls back to its default instead of
+      // coming back undefined — a shallow spread would drop those.
+      return deepMergePrices(DEFAULT_PRICES, parsed)
     } catch (e) { /* use default */ }
   }
   
   return { ...DEFAULT_PRICES }
+}
+
+function deepMergePrices(base, override) {
+  const result = JSON.parse(JSON.stringify(base))
+  for (const key of Object.keys(override || {})) {
+    if (
+      override[key] && typeof override[key] === 'object' && !Array.isArray(override[key]) &&
+      result[key] && typeof result[key] === 'object'
+    ) {
+      result[key] = deepMergePrices(result[key], override[key])
+    } else {
+      result[key] = override[key]
+    }
+  }
+  return result
 }
 
 async function saveProductPrices(prices) {
@@ -89,8 +132,12 @@ async function saveProductPrices(prices) {
   
   // Invalidate all price caches
   cache.invalidate('price_gemini')
+  cache.invalidate('price_coursera')
+  cache.invalidate('price_coursera_stock')
   cache.invalidate('price_premium')
   cache.invalidate('price_stars')
+  cache.invalidate('price_airtime_data')
+  cache.invalidate('price_airtime_voice')
 }
 
 export const api = {
@@ -215,12 +262,59 @@ export const api = {
     return result
   },
 
+  async getCourseraPrice() {
+    const cacheKey = 'price_coursera'
+    const cached = cache.get(cacheKey)
+    if (cached) return cached
+
+    const prices = await getProductPrices()
+    const result = prices.coursera?.priceInBirr ?? DEFAULT_PRICES.coursera.priceInBirr
+    cache.set(cacheKey, result, PRICES_CACHE_TTL)
+    return result
+  },
+
+  async getCourseraStock() {
+    const cacheKey = 'price_coursera_stock'
+    const cached = cache.get(cacheKey)
+    if (cached !== null) return cached
+
+    const prices = await getProductPrices()
+    const result = prices.coursera?.inStock !== false
+    cache.set(cacheKey, result, PRICES_CACHE_TTL)
+    return result
+  },
+
+  async getAirtimeDataPrices() {
+    const cacheKey = 'price_airtime_data'
+    const cached = cache.get(cacheKey)
+    if (cached) return cached
+
+    const prices = await getProductPrices()
+    const result = prices.airtime?.data || DEFAULT_PRICES.airtime.data
+    cache.set(cacheKey, result, PRICES_CACHE_TTL)
+    return result
+  },
+
+  async getAirtimeVoicePrices() {
+    const cacheKey = 'price_airtime_voice'
+    const cached = cache.get(cacheKey)
+    if (cached) return cached
+
+    const prices = await getProductPrices()
+    const result = prices.airtime?.voice || DEFAULT_PRICES.airtime.voice
+    cache.set(cacheKey, result, PRICES_CACHE_TTL)
+    return result
+  },
+
   async getAllPrices() {
     const prices = await getProductPrices()
     return {
       gemini: prices.gemini?.priceInBirr || DEFAULT_PRICES.gemini.priceInBirr,
+      coursera: prices.coursera?.priceInBirr ?? DEFAULT_PRICES.coursera.priceInBirr,
+      courseraInStock: prices.coursera?.inStock !== false,
       premium: prices.premium || DEFAULT_PRICES.premium,
-      stars: prices.stars?.pricePerStar || DEFAULT_PRICES.stars.pricePerStar
+      stars: prices.stars?.pricePerStar || DEFAULT_PRICES.stars.pricePerStar,
+      airtime: prices.airtime || DEFAULT_PRICES.airtime,
     }
   },
 
@@ -228,6 +322,22 @@ export const api = {
     const prices = await getProductPrices()
     if (!prices.gemini) prices.gemini = {}
     prices.gemini.priceInBirr = priceInBirr
+    await saveProductPrices(prices)
+    return true
+  },
+
+  async updateCourseraPrice(priceInBirr) {
+    const prices = await getProductPrices()
+    if (!prices.coursera) prices.coursera = {}
+    prices.coursera.priceInBirr = priceInBirr
+    await saveProductPrices(prices)
+    return true
+  },
+
+  async updateCourseraStock(inStock) {
+    const prices = await getProductPrices()
+    if (!prices.coursera) prices.coursera = {}
+    prices.coursera.inStock = !!inStock
     await saveProductPrices(prices)
     return true
   },
@@ -245,6 +355,16 @@ export const api = {
     const prices = await getProductPrices()
     if (!prices.stars) prices.stars = {}
     prices.stars.pricePerStar = pricePerStar
+    await saveProductPrices(prices)
+    return true
+  },
+
+  async updateAirtimePrice(category, durationKey, priceInBirr) {
+    const prices = await getProductPrices()
+    if (!prices.airtime) prices.airtime = {}
+    if (!prices.airtime[category]) prices.airtime[category] = {}
+    if (!prices.airtime[category][durationKey]) prices.airtime[category][durationKey] = {}
+    prices.airtime[category][durationKey].priceInBirr = priceInBirr
     await saveProductPrices(prices)
     return true
   },
@@ -610,6 +730,29 @@ export const api = {
       console.error('Failed to notify user:', err)
       throw err
     }
+  },
+
+  // Delivers Coursera account credentials by Telegram DM, in the same
+  // format the bot itself sends when an admin approves via chat
+  // (handlers/coursera.js). Used by the dashboard's Orders panel when the
+  // admin approves a pending Coursera order and enters the account email
+  // and password right there instead of in Telegram.
+  async sendCourseraCredentials(order, email, password) {
+    const label = order?.package_label || 'Coursera Plus'
+    const message =
+      `<b>✔️ Your order has been approved!</b>\n\n` +
+      `Your ${label} has been verified and your account details are below. 🚀\n\n` +
+      `<b>📧 Coursera Account</b>\n\n` +
+      `<b>Email:</b> <code>${escapeHtml(email)}</code>\n` +
+      `<b>Password:</b> <code>${escapeHtml(password)}</code>\n\n` +
+      `<b>ℹ️ Instructions</b>\n` +
+      `Log in to Coursera using the email and password above. Change your password after your first login, ` +
+      `add a recovery email, and connect your Google or Facebook account (recommended).\n\n` +
+      `<b>⚠️ Important:</b> The email on the account cannot be changed until the subscription expires. ` +
+      `Certificates are issued in your own name.\n\n` +
+      `Thank you for your purchase! 🙏`
+
+    return this.notifyUser(order.user_id, message, 'HTML')
   },
 
   async sendBroadcastMessage(text, photoFileId = null, keyboard = null, onProgress = null, options = {}) {
