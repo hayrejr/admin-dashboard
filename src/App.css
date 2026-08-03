@@ -1,7 +1,38 @@
+/* Password field (reused by Login and the Orders credentials modal) */
+.password-input-wrapper {
+  position: relative;
+}
+
+.password-input-wrapper input {
+  width: 100%;
+  padding-right: 2.5rem;
+}
+
+.password-toggle {
+  position: absolute;
+  right: 0.6rem;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  padding: 0.25rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s var(--ease);
+}
+
+.password-toggle:hover {
+  color: var(--text-2);
+}
+
 /* Coupon Form */
 .coupon-form {
-  background: #f8fafc;
-  border-radius: 0.75rem;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
   padding: 1.25rem;
   margin-bottom: 1.5rem;
 }
@@ -9,8 +40,8 @@
 .coupon-form h4 {
   margin: 0 0 1rem;
   font-size: 0.875rem;
-  font-weight: 600;
-  color: #0f172a;
+  font-weight: 700;
+  color: var(--text);
 }
 
 .form-grid {
@@ -43,17 +74,20 @@
 }
 
 .filter-select {
-  padding: 0.375rem 0.75rem;
-  border-radius: 0.5rem;
-  border: 1px solid #e2e8f0;
+  padding: 0.4rem 0.8rem;
+  border-radius: 0.625rem;
+  border: 1px solid var(--border);
   font-size: 0.75rem;
-  background: #f8fafc;
+  font-weight: 500;
+  background: var(--surface-sunken);
+  color: var(--text-2);
   outline: none;
+  transition: box-shadow 0.15s var(--ease), border-color 0.15s var(--ease);
 }
 
 .filter-select:focus {
-  border-color: #2563eb;
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+  border-color: var(--primary-100);
+  box-shadow: 0 0 0 3px var(--primary-50);
 }
 
 .stats-grid {
@@ -64,21 +98,23 @@
 
 .stat-item {
   text-align: center;
-  padding: 1rem;
-  background: #f8fafc;
-  border-radius: 0.75rem;
+  padding: 1.125rem 1rem;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
 }
 
 .stat-value {
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: #0f172a;
+  font-size: 1.625rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text);
   margin: 0;
 }
 
 .stat-label {
   font-size: 0.75rem;
-  color: #94a3b8;
+  color: var(--text-faint);
   margin: 0.25rem 0 0;
 }
 
@@ -96,7 +132,7 @@
 .filter-select--block {
   width: 100%;
   margin-top: 0.375rem;
-  padding: 0.5rem 0.75rem;
+  padding: 0.55rem 0.75rem;
   font-size: 0.875rem;
 }
 
@@ -110,23 +146,24 @@
 
 .token-row__label {
   font-size: 0.75rem;
-  color: #94a3b8;
+  color: var(--text-faint);
 }
 
 .token-btn {
-  border: 1px solid #dbeafe;
-  background: #eff6ff;
-  color: #2563eb;
-  border-radius: 0.375rem;
-  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--primary-100);
+  background: var(--primary-50);
+  color: var(--primary-700);
+  border-radius: 0.5rem;
+  padding: 0.3rem 0.6rem;
   font-size: 0.75rem;
-  font-weight: 600;
+  font-weight: 700;
   font-family: inherit;
   cursor: pointer;
+  transition: background 0.15s var(--ease);
 }
 
 .token-btn:hover:not(:disabled) {
-  background: #dbeafe;
+  background: var(--primary-100);
 }
 
 .token-btn:disabled {
@@ -142,13 +179,13 @@
 .speed-slider {
   width: 100%;
   margin-top: 0.5rem;
-  accent-color: #2563eb;
+  accent-color: var(--primary);
 }
 
 .field-error {
   margin: 0.375rem 0 0;
   font-size: 0.75rem;
-  color: #dc2626;
+  color: var(--danger);
 }
 
 .broadcast-actions {
@@ -161,12 +198,13 @@
 }
 
 .btn-danger {
-  border-color: #fecaca;
-  color: #dc2626;
+  border-color: var(--danger-ring);
+  color: var(--danger);
+  background: var(--surface);
 }
 
 .btn-danger:hover:not(:disabled) {
-  background: #fef2f2;
+  background: var(--danger-bg);
 }
 
 .btn:disabled {
@@ -178,21 +216,24 @@
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(15, 23, 42, 0.5);
+  background: rgba(10, 10, 18, 0.55);
+  backdrop-filter: blur(3px);
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 1rem;
   z-index: 100;
+  animation: fadeInUp 0.15s var(--ease-out);
 }
 
 .modal {
-  background: #ffffff;
-  border-radius: 0.75rem;
+  background: var(--surface);
+  border-radius: var(--radius-lg);
   width: 100%;
   max-width: 440px;
-  padding: 1.25rem;
-  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.25);
+  padding: 1.375rem;
+  box-shadow: var(--shadow-lg);
+  animation: scaleIn 0.2s var(--ease-out);
 }
 
 .modal__header {
@@ -204,22 +245,28 @@
 
 .modal__header h3 {
   margin: 0;
-  font-size: 1rem;
-  font-weight: 700;
-  color: #0f172a;
+  font-size: 1.0625rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: var(--text);
 }
 
 .modal__close {
   background: none;
   border: none;
-  color: #94a3b8;
+  color: var(--text-faint);
   cursor: pointer;
   display: flex;
+  transition: color 0.15s var(--ease);
+}
+
+.modal__close:hover {
+  color: var(--text-2);
 }
 
 .modal__hint {
   font-size: 0.8125rem;
-  color: #64748b;
+  color: var(--text-muted);
   margin: 0 0 1rem;
 }
 
@@ -233,7 +280,7 @@
 .progress-bar {
   position: relative;
   height: 0.5rem;
-  background: #e2e8f0;
+  background: var(--border-soft);
   border-radius: 9999px;
   overflow: hidden;
   margin-top: 0.5rem;
@@ -241,8 +288,8 @@
 
 .progress-fill {
   height: 100%;
-  background: #2563eb;
-  transition: width 0.3s;
+  background: var(--accent-gradient);
+  transition: width 0.3s var(--ease);
 }
 
 .progress-bar span {
@@ -250,25 +297,25 @@
   right: 0;
   top: -1.25rem;
   font-size: 0.625rem;
-  color: #94a3b8;
+  color: var(--text-faint);
 }
 
 .broadcast-result {
   padding: 0.75rem 1rem;
-  border-radius: 0.5rem;
+  border-radius: var(--radius-md);
   margin-top: 0.5rem;
 }
 
 .broadcast-result.success {
-  background: #ecfdf5;
-  border: 1px solid #a7f3d0;
-  color: #059669;
+  background: var(--success-bg);
+  border: 1px solid var(--success-ring);
+  color: var(--success);
 }
 
 .broadcast-result.error {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
-  color: #dc2626;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-ring);
+  color: var(--danger);
 }
 
 .broadcast-result p {
@@ -281,7 +328,9 @@
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* Responsive tweaks */
@@ -289,7 +338,7 @@
   .form-grid {
     grid-template-columns: 1fr;
   }
-  
+
   .stats-grid {
     grid-template-columns: 1fr;
   }
@@ -299,7 +348,7 @@
   .referrals-grid {
     grid-template-columns: 2fr 1fr;
   }
-  
+
   .settings-grid {
     grid-template-columns: 1fr 1fr;
   }
