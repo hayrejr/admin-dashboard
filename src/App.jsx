@@ -1,5 +1,5 @@
 // src/App.jsx
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useAuth } from './context/AuthContext'
 import { AdminProvider, useAdmin } from './context/AdminContext'
 import { Login } from './components/Login'
@@ -46,6 +46,12 @@ import {
   Eye,
   EyeOff,
   KeyRound,
+  Ban,
+  UserCheck,
+  Save,
+  AlertTriangle,
+  Banknote,
+  UserPlus,
 } from 'lucide-react'
 import {
   ResponsiveContainer,
@@ -72,6 +78,7 @@ const NAV_ITEMS = [
   { key: 'orders', label: 'Orders', icon: Package },
   { key: 'coupons', label: 'Coupons', icon: Tag },
   { key: 'prices', label: 'Prices', icon: DollarSign },  // ADD THIS
+  { key: 'withdrawals', label: 'Withdrawals', icon: Banknote },
   { key: 'referrals', label: 'Referrals', icon: Share2 },
   { key: 'broadcast', label: 'Broadcast', icon: Send },
   { key: 'settings', label: 'Settings', icon: SettingsIcon },
@@ -155,10 +162,10 @@ function Toggle({ checked, onChange, label, description }) {
   )
 }
 
-function Modal({ title, onClose, children }) {
+function Modal({ title, onClose, children, wide = false }) {
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className={`modal ${wide ? 'modal--wide' : ''}`} onClick={(e) => e.stopPropagation()}>
         <div className="modal__header">
           <h3>{title}</h3>
           <button className="modal__close" onClick={onClose}>
@@ -360,10 +367,73 @@ function Overview({ onNavigate }) {
 // USERS COMPONENT
 // ============================================
 
+// Row renderer for the Users Overview detail modal — the shape of each
+// item differs by which stat card was clicked (user rows vs. withdrawal
+// rows vs. referral-bonus order rows).
+function OverviewDetailRow({ type, item }) {
+  if (type === 'withdrawn') {
+    return (
+      <>
+        <span>#{item.id} · {item.users?.username ? `@${item.users.username}` : (item.users?.name || 'N/A')}</span>
+        <span>{Number(item.amount).toLocaleString()} ETB · {new Date(item.updated_at || item.created_at).toLocaleDateString()}</span>
+      </>
+    )
+  }
+  if (type === 'referralEarned') {
+    return (
+      <>
+        <span>Order #{item.id} · {item.users?.username ? `@${item.users.username}` : (item.users?.name || 'N/A')}</span>
+        <span>+{Number(item.bonus).toLocaleString()} ETB</span>
+      </>
+    )
+  }
+  // totalUsers, normalStart, referralJoined — all plain user rows
+  return (
+    <>
+      <span>{item.name || 'Unknown'}{item.username ? ` · @${item.username}` : ''}</span>
+      <span>{Number(item.balance || 0).toLocaleString()} ETB</span>
+    </>
+  )
+}
+
 function UsersPanel() {
-  const { users, loading, refresh } = useAdmin()
+  const { users, loading, usersOverview, api } = useAdmin()
   const [query, setQuery] = useState("")
-  
+  const [detailUser, setDetailUser] = useState(null)
+  const [banTarget, setBanTarget] = useState(null)
+  const [banReason, setBanReason] = useState('')
+  const [banBusy, setBanBusy] = useState(false)
+  const [busyId, setBusyId] = useState(null)
+  const { banUser, unbanUser } = useAdmin()
+
+  const [overviewDetail, setOverviewDetail] = useState(null) // { type, title }
+  const [overviewItems, setOverviewItems] = useState([])
+  const [overviewLoading, setOverviewLoading] = useState(false)
+
+  const openOverviewDetail = async (type, title) => {
+    setOverviewDetail({ type, title })
+    setOverviewLoading(true)
+    setOverviewItems([])
+    try {
+      let items = []
+      if (type === 'totalUsers') items = users
+      else if (type === 'normalStart') items = await api.getNormalStartUsersList()
+      else if (type === 'referralJoined') items = await api.getReferralJoinedUsersList()
+      else if (type === 'withdrawn') items = await api.getCompletedWithdrawalsList()
+      else if (type === 'referralEarned') items = await api.getReferralEarnedList()
+      setOverviewItems(items)
+    } catch (err) {
+      console.error('Failed to load overview detail:', err)
+    } finally {
+      setOverviewLoading(false)
+    }
+  }
+
+  const closeOverviewDetail = () => {
+    setOverviewDetail(null)
+    setOverviewItems([])
+  }
+
   const filtered = React.useMemo(() =>
     users.filter((u) =>
       `${u.name || ''} ${u.username || ''} ${u.user_id || ''}`.toLowerCase().includes(query.toLowerCase())
@@ -371,8 +441,65 @@ function UsersPanel() {
     [users, query]
   )
 
+  const openBanModal = (u) => {
+    setBanReason('')
+    setBanTarget(u)
+  }
+
+  const closeBanModal = () => {
+    if (banBusy) return
+    setBanTarget(null)
+  }
+
+  const confirmBan = async () => {
+    if (!banTarget) return
+    setBanBusy(true)
+    try {
+      await banUser(banTarget.user_id, banReason.trim() || null)
+      setBanTarget(null)
+    } finally {
+      setBanBusy(false)
+    }
+  }
+
+  const handleUnban = async (u) => {
+    setBusyId(u.user_id)
+    try {
+      await unbanUser(u.user_id)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
   return (
-    <Card>
+    <div className="section-stack">
+      <Card>
+        <SectionHeading eyebrow="Snapshot" title="Users Overview" />
+        <div className="stats-grid stats-grid--5">
+          <button type="button" className="stat-item" onClick={() => openOverviewDetail('totalUsers', 'All Users')}>
+            <p className="stat-value">{usersOverview ? usersOverview.totalUsers.toLocaleString() : '…'}</p>
+            <p className="stat-label">👥 Total Users</p>
+          </button>
+          <button type="button" className="stat-item" onClick={() => openOverviewDetail('referralEarned', 'Referral Earnings (Gemini Pro bonus)')}>
+            <p className="stat-value">{usersOverview ? `~${usersOverview.totalReferralEarned.toLocaleString()}` : '…'}</p>
+            <p className="stat-label">💰 Total Referral Earned</p>
+          </button>
+          <button type="button" className="stat-item" onClick={() => openOverviewDetail('withdrawn', 'Completed Withdrawals')}>
+            <p className="stat-value">{usersOverview ? usersOverview.totalWithdrawn.toLocaleString() : '…'}</p>
+            <p className="stat-label">💸 Total Withdrawn</p>
+          </button>
+          <button type="button" className="stat-item" onClick={() => openOverviewDetail('normalStart', 'Normal Start Users (No Invite)')}>
+            <p className="stat-value">{usersOverview ? usersOverview.normalStartUsers.toLocaleString() : '…'}</p>
+            <p className="stat-label">🆕 Normal Start Users (No Invite)</p>
+          </button>
+          <button type="button" className="stat-item" onClick={() => openOverviewDetail('referralJoined', 'Referral-Joined Users')}>
+            <p className="stat-value">{usersOverview ? usersOverview.referralJoinedUsers.toLocaleString() : '…'}</p>
+            <p className="stat-label">🔗 Referral-Joined Users</p>
+          </button>
+        </div>
+      </Card>
+
+      <Card>
       <SectionHeading
         eyebrow={`${users.length} users`}
         title="Users"
@@ -398,13 +525,14 @@ function UsersPanel() {
               <th>Balance</th>
               <th>Referrals</th>
               <th>Status</th>
+              <th className="text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={7} className="empty-row">Loading...</td></tr>
+              <tr><td colSpan={8} className="empty-row">Loading...</td></tr>
             ) : filtered.length === 0 ? (
-              <tr><td colSpan={7} className="empty-row">No users found</td></tr>
+              <tr><td colSpan={8} className="empty-row">No users found</td></tr>
             ) : (
               filtered.slice(0, 20).map((u) => (
                 <tr key={u.user_id}>
@@ -423,10 +551,40 @@ function UsersPanel() {
                   <td className="cell-muted">{u.balance || 0}</td>
                   <td className="cell-muted">{u.referral_count || 0}</td>
                   <td>
-                    <span className={`status-dot-pill ${u.channels_joined ? 'status-dot-pill--active' : 'status-dot-pill--inactive'}`}>
-                      <span className={`status-dot ${u.channels_joined ? 'status-dot--active' : 'status-dot--inactive'}`} />
-                      {u.channels_joined ? 'Active' : 'Inactive'}
-                    </span>
+                    {u.is_banned ? (
+                      <span className="status-dot-pill status-dot-pill--danger">
+                        <span className="status-dot status-dot--danger" />
+                        Banned
+                      </span>
+                    ) : (
+                      <span className={`status-dot-pill ${u.channels_joined ? 'status-dot-pill--active' : 'status-dot-pill--inactive'}`}>
+                        <span className={`status-dot ${u.channels_joined ? 'status-dot--active' : 'status-dot--inactive'}`} />
+                        {u.channels_joined ? 'Active' : 'Inactive'}
+                      </span>
+                    )}
+                  </td>
+                  <td className="text-right">
+                    <div className="row-actions">
+                      <button className="btn btn-outline" onClick={() => setDetailUser(u)}>
+                        <Eye size={14} />
+                        View
+                      </button>
+                      {u.is_banned ? (
+                        <button
+                          className="btn btn-outline"
+                          disabled={busyId === u.user_id}
+                          onClick={() => handleUnban(u)}
+                        >
+                          <UserCheck size={14} />
+                          {busyId === u.user_id ? '...' : 'Unban'}
+                        </button>
+                      ) : (
+                        <button className="btn btn-danger" onClick={() => openBanModal(u)}>
+                          <Ban size={14} />
+                          Ban
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))
@@ -434,7 +592,258 @@ function UsersPanel() {
           </tbody>
         </table>
       </div>
+
+      {detailUser && (
+        <UserDetailModal user={detailUser} onClose={() => setDetailUser(null)} />
+      )}
+
+      {overviewDetail && (
+        <Modal title={overviewDetail.title} onClose={closeOverviewDetail} wide>
+          {overviewLoading ? (
+            <p className="modal__hint">Loading…</p>
+          ) : overviewItems.length === 0 ? (
+            <p className="modal__hint">No records found.</p>
+          ) : (
+            <div className="user-detail__orders-list" style={{ maxHeight: 380 }}>
+              {overviewItems.map((item) => (
+                <div key={item.id || item.user_id} className="user-detail__order-row">
+                  <OverviewDetailRow type={overviewDetail.type} item={item} />
+                </div>
+              ))}
+            </div>
+          )}
+        </Modal>
+      )}
+
+      {banTarget && (
+        <Modal title={`Ban @${banTarget.username || banTarget.user_id}`} onClose={closeBanModal}>
+          <p className="modal__hint">
+            This blocks every bot interaction for this user immediately — they'll see a
+            "your account has been banned" message instead of the menu.
+          </p>
+          <div className="form-field">
+            <label className="form-field__label">Reason (optional, shown to the user)</label>
+            <textarea
+              value={banReason}
+              onChange={(e) => setBanReason(e.target.value)}
+              placeholder="e.g. Repeated fraudulent orders"
+              rows={3}
+            />
+          </div>
+          <div className="modal__actions">
+            <button className="btn btn-outline" onClick={closeBanModal} disabled={banBusy}>Cancel</button>
+            <button className="btn btn-danger" onClick={confirmBan} disabled={banBusy}>
+              {banBusy ? 'Banning...' : 'Ban User'}
+            </button>
+          </div>
+        </Modal>
+      )}
     </Card>
+    </div>
+  )
+}
+
+// ============================================
+// USER DETAIL MODAL — profile, live balance edit,
+// ban/unban, and full order history for one user.
+// ============================================
+
+function UserDetailModal({ user, onClose }) {
+  const { adjustUserBalance, banUser, unbanUser, getUserOrders } = useAdmin()
+  const [balanceInput, setBalanceInput] = useState(String(user.balance ?? 0))
+  const [savingBalance, setSavingBalance] = useState(false)
+  const [balanceError, setBalanceError] = useState(null)
+  const [balanceSaved, setBalanceSaved] = useState(false)
+
+  const [orders, setOrders] = useState([])
+  const [ordersLoading, setOrdersLoading] = useState(true)
+  const [ordersError, setOrdersError] = useState(null)
+
+  const [banBusy, setBanBusy] = useState(false)
+  const [showBanReason, setShowBanReason] = useState(false)
+  const [banReason, setBanReason] = useState('')
+
+  // Local mirror of ban state so the modal reflects an action taken
+  // inside it without waiting for the parent list's realtime update.
+  const [isBanned, setIsBanned] = useState(!!user.is_banned)
+
+  useEffect(() => {
+    let mounted = true
+    setOrdersLoading(true)
+    getUserOrders(user.user_id)
+      .then((data) => { if (mounted) setOrders(data) })
+      .catch((err) => { if (mounted) setOrdersError(err.message) })
+      .finally(() => { if (mounted) setOrdersLoading(false) })
+    return () => { mounted = false }
+  }, [user.user_id, getUserOrders])
+
+  const handleSaveBalance = async () => {
+    setBalanceError(null)
+    setBalanceSaved(false)
+    const amount = Number(balanceInput)
+    if (!Number.isFinite(amount) || amount < 0) {
+      setBalanceError('Enter a valid, non-negative number.')
+      return
+    }
+    setSavingBalance(true)
+    try {
+      await adjustUserBalance(user.user_id, amount)
+      setBalanceSaved(true)
+      setTimeout(() => setBalanceSaved(false), 2000)
+    } catch (err) {
+      setBalanceError(err.message || 'Failed to save balance')
+    } finally {
+      setSavingBalance(false)
+    }
+  }
+
+  const handleBan = async () => {
+    setBanBusy(true)
+    try {
+      await banUser(user.user_id, banReason.trim() || null)
+      setIsBanned(true)
+      setShowBanReason(false)
+    } finally {
+      setBanBusy(false)
+    }
+  }
+
+  const handleUnban = async () => {
+    setBanBusy(true)
+    try {
+      await unbanUser(user.user_id)
+      setIsBanned(false)
+    } finally {
+      setBanBusy(false)
+    }
+  }
+
+  return (
+    <Modal title={user.name || 'User'} onClose={onClose}>
+      <div className="user-detail">
+        <div className="user-detail__header">
+          <div className="user-cell__avatar user-cell__avatar--lg">{user.name?.charAt(0) || 'U'}</div>
+          <div>
+            <p className="user-cell__name">{user.name || 'Unknown'}</p>
+            <p className="user-cell__username">{user.username ? `@${user.username}` : 'no username'}</p>
+            <p className="cell-mono" style={{ marginTop: '0.25rem' }}>{user.user_id}</p>
+          </div>
+          {isBanned && (
+            <span className="status-dot-pill status-dot-pill--danger" style={{ marginLeft: 'auto' }}>
+              <span className="status-dot status-dot--danger" />
+              Banned
+            </span>
+          )}
+        </div>
+
+        <div className="user-detail__stats">
+          <div className="stat-item">
+            <p className="stat-value">{user.joined_date || 'N/A'}</p>
+            <p className="stat-label">Joined</p>
+          </div>
+          <div className="stat-item">
+            <p className="stat-value">{user.referral_count || 0}</p>
+            <p className="stat-label">Referrals</p>
+          </div>
+          <div className="stat-item">
+            <p className="stat-value">{orders.length}</p>
+            <p className="stat-label">Orders</p>
+          </div>
+          <div className="stat-item">
+            <p className="stat-value">{user.channels_joined ? 'Active' : 'Inactive'}</p>
+            <p className="stat-label">Channel Status</p>
+          </div>
+        </div>
+
+        {isBanned && user.ban_reason && (
+          <div className="broadcast-alert broadcast-alert--warning" style={{ marginBottom: '1rem' }}>
+            <AlertTriangle size={16} />
+            <p>Ban reason: {user.ban_reason}</p>
+          </div>
+        )}
+
+        <div className="form-field">
+          <label className="form-field__label">Balance (ETB)</label>
+          <div className="code-input">
+            <input
+              type="number"
+              min="0"
+              value={balanceInput}
+              onChange={(e) => setBalanceInput(e.target.value)}
+              disabled={savingBalance}
+            />
+            <button className="btn btn-primary" onClick={handleSaveBalance} disabled={savingBalance}>
+              <Save size={14} />
+              {savingBalance ? 'Saving...' : 'Save'}
+            </button>
+          </div>
+          {balanceError && <p className="field-error">{balanceError}</p>}
+          {balanceSaved && <p className="stat-label" style={{ color: 'var(--success)' }}>Balance updated ✓</p>}
+        </div>
+
+        {user.withdrawal_method_display && (
+          <div className="form-field">
+            <label className="form-field__label">Withdrawal Account</label>
+            <p className="cell-muted" style={{ margin: 0 }}>
+              {user.withdrawal_method_display} — {user.withdrawal_account_name || 'N/A'} ({user.withdrawal_account_number || 'N/A'})
+            </p>
+          </div>
+        )}
+
+        <div className="user-detail__orders">
+          <p className="form-field__label" style={{ marginBottom: '0.5rem', display: 'block' }}>Order History</p>
+          {ordersLoading ? (
+            <p className="cell-muted">Loading orders…</p>
+          ) : ordersError ? (
+            <p className="field-error">{ordersError}</p>
+          ) : orders.length === 0 ? (
+            <p className="cell-muted">No orders yet.</p>
+          ) : (
+            <div className="user-detail__orders-list">
+              {orders.slice(0, 8).map((o) => (
+                <div key={o.id} className="user-detail__order-row">
+                  <ServiceTag service={o.order_type} />
+                  <span className="cell-muted">{o.price_display || `${o.price} ETB`}</span>
+                  <StatusPill status={o.status} />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {showBanReason ? (
+          <div className="form-field">
+            <label className="form-field__label">Ban reason (optional)</label>
+            <textarea
+              value={banReason}
+              onChange={(e) => setBanReason(e.target.value)}
+              rows={2}
+              disabled={banBusy}
+            />
+          </div>
+        ) : null}
+
+        <div className="modal__actions">
+          {isBanned ? (
+            <button className="btn btn-outline" onClick={handleUnban} disabled={banBusy}>
+              <UserCheck size={14} />
+              {banBusy ? 'Unbanning...' : 'Unban User'}
+            </button>
+          ) : showBanReason ? (
+            <button className="btn btn-danger" onClick={handleBan} disabled={banBusy}>
+              <Ban size={14} />
+              {banBusy ? 'Banning...' : 'Confirm Ban'}
+            </button>
+          ) : (
+            <button className="btn btn-danger" onClick={() => setShowBanReason(true)}>
+              <Ban size={14} />
+              Ban User
+            </button>
+          )}
+          <button className="btn btn-outline" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </Modal>
   )
 }
 
@@ -716,6 +1125,180 @@ function OrdersPanel() {
             </button>
             <button className="btn btn-primary" onClick={confirmCreds} disabled={credsSaving}>
               {credsSaving ? 'Sending…' : 'Approve & Send'}
+            </button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  )
+}
+
+// ============================================
+// WITHDRAWALS COMPONENT
+// ============================================
+
+function WithdrawalsPanel() {
+  const { withdrawals, refresh, completeWithdrawal, rejectWithdrawal } = useAdmin()
+  const [filter, setFilter] = useState('all')
+  const [busyId, setBusyId] = useState(null)
+  const [rejectTarget, setRejectTarget] = useState(null)
+  const [rejectReason, setRejectReason] = useState('')
+  const [rejecting, setRejecting] = useState(false)
+
+  const filteredWithdrawals = filter === 'all'
+    ? withdrawals
+    : withdrawals.filter(w => w.status === filter)
+
+  const counts = ['pending', 'completed', 'rejected'].map(s => ({
+    status: s,
+    count: withdrawals.filter(w => w.status === s).length,
+  }))
+
+  const handleComplete = async (withdrawalId) => {
+    setBusyId(withdrawalId)
+    try {
+      await completeWithdrawal(withdrawalId)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const openRejectModal = (w) => {
+    setRejectReason('')
+    setRejectTarget(w)
+  }
+
+  const closeRejectModal = () => {
+    if (rejecting) return
+    setRejectTarget(null)
+  }
+
+  const confirmReject = async () => {
+    if (!rejectTarget) return
+    setRejecting(true)
+    try {
+      await rejectWithdrawal(rejectTarget.id, rejectReason.trim())
+      setRejectTarget(null)
+    } finally {
+      setRejecting(false)
+    }
+  }
+
+  return (
+    <div className="section-stack">
+      <div className="status-summary-grid">
+        {counts.map((c) => {
+          const meta = STATUS_META[c.status]
+          const Icon = meta.icon
+          return (
+            <Card key={c.status} className="status-summary-card" onClick={() => setFilter(c.status)}>
+              <div className={`status-summary-card__icon icon-bg--${meta.cls}`}>
+                <Icon size={18} />
+              </div>
+              <div>
+                <p className="status-summary-card__count">{c.count}</p>
+                <p className="status-summary-card__label">{meta.label}</p>
+              </div>
+            </Card>
+          )
+        })}
+      </div>
+
+      <Card>
+        <SectionHeading
+          eyebrow={`${filteredWithdrawals.length} withdrawals`}
+          title="Withdrawals"
+          action={
+            <div className="orders-actions">
+              <button onClick={refresh} className="link-btn">
+                <RefreshCw size={16} />
+              </button>
+              <select value={filter} onChange={(e) => setFilter(e.target.value)} className="filter-select">
+                <option value="all">All</option>
+                <option value="pending">Pending</option>
+                <option value="completed">Completed</option>
+                <option value="rejected">Rejected</option>
+              </select>
+            </div>
+          }
+        />
+        <div className="table-scroll">
+          <table className="data-table data-table--min-720">
+            <thead>
+              <tr>
+                <th>Withdrawal</th>
+                <th>User</th>
+                <th>Amount</th>
+                <th>Method</th>
+                <th>Account</th>
+                <th>Date</th>
+                <th>Status</th>
+                <th className="text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredWithdrawals.length === 0 ? (
+                <tr><td colSpan={8} className="empty-row">No withdrawals found</td></tr>
+              ) : (
+                filteredWithdrawals.slice(0, 20).map((w) => (
+                  <tr key={w.id}>
+                    <td className="cell-strong">#{w.id}</td>
+                    <td className="cell-muted">{w.users?.username ? `@${w.users.username}` : (w.users?.name || 'N/A')}</td>
+                    <td className="cell-muted">{Number(w.amount).toLocaleString()} ETB</td>
+                    <td className="cell-muted">{w.method_display || w.method || 'N/A'}</td>
+                    <td className="cell-mono">{w.account_name} · {w.account_number}</td>
+                    <td className="cell-muted">{new Date(w.created_at).toLocaleDateString()}</td>
+                    <td><StatusPill status={w.status} /></td>
+                    <td className="text-right">
+                      {w.status === 'pending' && (
+                        <div className="row-actions">
+                          <button
+                            className="btn btn-primary"
+                            disabled={busyId === w.id}
+                            onClick={() => handleComplete(w.id)}
+                          >
+                            {busyId === w.id ? 'Paying…' : 'Mark Paid'}
+                          </button>
+                          <button
+                            className="btn btn-outline btn-danger"
+                            disabled={busyId === w.id}
+                            onClick={() => openRejectModal(w)}
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      {rejectTarget && (
+        <Modal title={`Reject Withdrawal #${rejectTarget.id}`} onClose={closeRejectModal}>
+          <p className="modal__hint">
+            The {Number(rejectTarget.amount).toLocaleString()} ETB reserved for this request will be
+            refunded to the user's balance automatically, and they'll be notified by Telegram DM.
+          </p>
+          <div className="form-field">
+            <label className="form-field__label">Reason (optional)</label>
+            <textarea
+              rows={4}
+              value={rejectReason}
+              onChange={(e) => setRejectReason(e.target.value)}
+              placeholder="e.g. Account details couldn't be verified"
+              autoFocus
+            />
+          </div>
+          <div className="modal__actions">
+            <button className="btn btn-outline" onClick={closeRejectModal} disabled={rejecting}>
+              Cancel
+            </button>
+            <button className="btn btn-danger" onClick={confirmReject} disabled={rejecting}>
+              {rejecting ? 'Rejecting...' : 'Confirm Reject'}
             </button>
           </div>
         </Modal>
@@ -1048,6 +1631,7 @@ function DashboardContent() {
       case 'orders': return <OrdersPanel />
       case 'coupons': return <CouponsPanel />
       case 'prices': return <PriceManagement />
+      case 'withdrawals': return <WithdrawalsPanel />
       case 'referrals': return <ReferralsPanel />
       case 'broadcast': return <BroadcastPanel />
       case 'settings': return <SettingsPanel />
