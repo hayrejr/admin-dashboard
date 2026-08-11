@@ -83,6 +83,34 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
 }
 
+// Supabase's functions.invoke() throws a generic "Failed to send a
+// request to the Edge Function (status undefined)" whenever the fetch to
+// the function's URL never gets an HTTP response at all — status is only
+// ever undefined for that failure mode. That almost always means one of:
+//   1. The function (e.g. send-telegram-message / send-telegram-photo)
+//      has never been deployed to this Supabase project.
+//   2. It was deployed under a different name than the one being invoked.
+//   3. Network/CORS is blocking the request before Supabase can respond.
+// This wraps the raw error with an actionable message instead of the
+// opaque one, while still preserving `.context` so callers that read
+// error.context.status keep working.
+function describeFunctionError(error) {
+  if (!error) return error
+  const status = error?.context?.status
+  if (error.name === 'FunctionsFetchError' || status === undefined) {
+    const wrapped = new Error(
+      `Could not reach the "${error?.context?.functionName || 'Telegram'}" Edge Function. ` +
+      `It's likely not deployed yet (run "supabase functions deploy send-telegram-message" and ` +
+      `"supabase functions deploy send-telegram-photo", and set the TELEGRAM_BOT_TOKEN secret) — ` +
+      `see supabase/functions/README.md. Original: ${error.message}`
+    )
+    wrapped.name = error.name
+    wrapped.context = error.context
+    return wrapped
+  }
+  return error
+}
+
 async function getProductPrices() {
   const { data, error } = await supabase
     .from('bot_settings')
@@ -120,6 +148,19 @@ function deepMergePrices(base, override) {
   return result
 }
 
+// Shared by writes made from this tab AND by the realtime handler below
+// (which fires when the *bot* writes product_prices from the Telegram
+// admin wizard), so both paths keep the dashboard's cache honest.
+function invalidatePriceCaches() {
+  cache.invalidate('price_gemini')
+  cache.invalidate('price_coursera')
+  cache.invalidate('price_coursera_stock')
+  cache.invalidate('price_premium')
+  cache.invalidate('price_stars')
+  cache.invalidate('price_airtime_data')
+  cache.invalidate('price_airtime_voice')
+}
+
 async function saveProductPrices(prices) {
   const { error } = await supabase
     .from('bot_settings')
@@ -130,14 +171,7 @@ async function saveProductPrices(prices) {
   
   if (error) throw error
   
-  // Invalidate all price caches
-  cache.invalidate('price_gemini')
-  cache.invalidate('price_coursera')
-  cache.invalidate('price_coursera_stock')
-  cache.invalidate('price_premium')
-  cache.invalidate('price_stars')
-  cache.invalidate('price_airtime_data')
-  cache.invalidate('price_airtime_voice')
+  invalidatePriceCaches()
 }
 
 export const api = {
@@ -425,14 +459,39 @@ export const api = {
   },
 
   async updateUser(userId, updates) {
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from('users')
       .update(updates)
       .eq('user_id', String(userId))
+      .select()
+      .single()
 
     if (error) throw error
     cache.invalidatePrefix('users_')
-    return true
+    return data
+  },
+
+  // Adjusts balance to an exact new value (not a delta — the dashboard
+  // shows the current balance and the admin edits it directly).
+  async adjustUserBalance(userId, newBalance) {
+    const amount = Number(newBalance)
+    if (!Number.isFinite(amount) || amount < 0) {
+      throw new Error('Balance must be a non-negative number')
+    }
+    return this.updateUser(userId, { balance: amount })
+  },
+
+  // Bans a user bot-wide. bot.js's ban-gate middleware checks
+  // is_banned on every interaction, and the bot-side realtime sync
+  // bridge busts that user's cache entry as soon as this write lands,
+  // so the ban takes effect within ~1s instead of waiting on the
+  // bot's user cache TTL.
+  async banUser(userId, reason = null) {
+    return this.updateUser(userId, { is_banned: true, ban_reason: reason || null })
+  },
+
+  async unbanUser(userId) {
+    return this.updateUser(userId, { is_banned: false, ban_reason: null })
   },
 
   // ============================================
@@ -702,6 +761,232 @@ export const api = {
   },
 
   // ============================================
+  // WITHDRAWALS
+  // ============================================
+
+  async getWithdrawals(limit = 50, offset = 0, status = null) {
+    let query = supabase
+      .from('withdrawals')
+      .select('*, users(name, username, balance)')
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1)
+
+    if (status) {
+      query = query.eq('status', status)
+    }
+
+    const { data, error } = await query
+    if (error) throw error
+    return data || []
+  },
+
+  async getPendingWithdrawals() {
+    const { data, error } = await supabase
+      .from('withdrawals')
+      .select('*, users(name, username, balance)')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false })
+
+    if (error) throw error
+    return data || []
+  },
+
+  async getWithdrawalById(withdrawalId) {
+    const { data, error } = await supabase
+      .from('withdrawals')
+      .select('*, users(name, username, balance)')
+      .eq('id', withdrawalId)
+      .single()
+
+    if (error) throw error
+    return data
+  },
+
+  // Marks a pending withdrawal as paid. The dashboard doesn't collect a
+  // proof screenshot the way the Telegram admin flow does — use the bot
+  // for that if you need a proof-channel post — this just confirms the
+  // payout happened and unlocks the notification to the user.
+  async completeWithdrawal(withdrawalId) {
+    const withdrawal = await this.getWithdrawalById(withdrawalId)
+    if (!withdrawal) throw new Error('Withdrawal not found')
+    if (withdrawal.status !== 'pending') throw new Error(`Already ${withdrawal.status}`)
+
+    const { error } = await supabase
+      .from('withdrawals')
+      .update({ status: 'completed', updated_at: new Date().toISOString() })
+      .eq('id', withdrawalId)
+
+    if (error) throw error
+
+    cache.invalidate('dashboard_stats')
+    cache.invalidate('users_overview')
+    return true
+  },
+
+  // Rejects a pending withdrawal and refunds the reserved balance back to
+  // the user — mirrors the bot's admin_withdraw_reject flow (handlers/
+  // adminWithdrawals.js), which deducts the amount up front when the
+  // request is created and only returns it if the admin rejects.
+  async rejectWithdrawal(withdrawalId, reason = null) {
+    const withdrawal = await this.getWithdrawalById(withdrawalId)
+    if (!withdrawal) throw new Error('Withdrawal not found')
+    if (withdrawal.status !== 'pending') throw new Error(`Already ${withdrawal.status}`)
+
+    const currentBalance = Number(withdrawal.users?.balance || 0)
+    const newBalance = currentBalance + Number(withdrawal.amount || 0)
+
+    const { error: userError } = await supabase
+      .from('users')
+      .update({ balance: newBalance })
+      .eq('user_id', withdrawal.user_id)
+
+    if (userError) throw userError
+
+    const { error } = await supabase
+      .from('withdrawals')
+      .update({ status: 'rejected', rejection_reason: reason || null, updated_at: new Date().toISOString() })
+      .eq('id', withdrawalId)
+
+    if (error) throw error
+
+    cache.invalidate('dashboard_stats')
+    cache.invalidate('users_overview')
+    cache.invalidatePrefix('users_')
+    return { newBalance }
+  },
+
+  async getUserWithdrawals(userId) {
+    const { data, error } = await supabase
+      .from('withdrawals')
+      .select('*')
+      .eq('user_id', String(userId))
+      .order('created_at', { ascending: false })
+
+    if (error) throw error
+    return data || []
+  },
+
+  // ============================================
+  // USERS OVERVIEW
+  // Mirrors the bot's own "📊 Users Overview" Telegram screen
+  // (handlers/admin.js's showUsersOverview) so the dashboard shows the
+  // same numbers: total users, referral origin split, total withdrawn,
+  // and an approximate total referral payout.
+  // ============================================
+
+  async getUsersOverview() {
+    const cacheKey = 'users_overview'
+    const cached = cache.get(cacheKey)
+    if (cached) return cached
+
+    const [
+      totalUsersRes,
+      normalStartRes,
+      referralJoinedRes,
+      withdrawalsRes,
+      bonusOrdersRes,
+      settings,
+    ] = await Promise.all([
+      supabase.from('users').select('*', { count: 'exact', head: true }),
+      supabase.from('users').select('*', { count: 'exact', head: true }).is('inviter_id', null),
+      supabase.from('users').select('*', { count: 'exact', head: true }).not('inviter_id', 'is', null),
+      supabase.from('withdrawals').select('amount').eq('status', 'completed'),
+      // Approximate, same caveat as the bot's own screen: there's no
+      // per-payout referral ledger, so this counts Gemini Pro purchases
+      // made by referred users (the trigger for the auto-paid active-user
+      // bonus) and multiplies by the current bonus rate.
+      supabase
+        .from('orders')
+        .select('id, users!inner(inviter_id)')
+        .eq('order_type', 'gemini_pro')
+        .in('status', ['approved', 'completed'])
+        .not('users.inviter_id', 'is', null),
+      this.getSettings(),
+    ])
+
+    if (totalUsersRes.error) throw totalUsersRes.error
+    if (normalStartRes.error) throw normalStartRes.error
+    if (referralJoinedRes.error) throw referralJoinedRes.error
+    if (withdrawalsRes.error) throw withdrawalsRes.error
+
+    const totalWithdrawn = (withdrawalsRes.data || []).reduce((sum, w) => sum + Number(w.amount || 0), 0)
+    const activeBonusBirr = Number(settings?.referral_active_bonus_birr) || 0
+    const bonusAwardedCount = bonusOrdersRes.error ? 0 : (bonusOrdersRes.data || []).length
+    const totalReferralEarned = bonusAwardedCount * activeBonusBirr
+
+    const result = {
+      totalUsers: totalUsersRes.count || 0,
+      normalStartUsers: normalStartRes.count || 0,
+      referralJoinedUsers: referralJoinedRes.count || 0,
+      totalWithdrawn,
+      totalReferralEarned,
+    }
+
+    cache.set(cacheKey, result, USERS_CACHE_TTL)
+    return result
+  },
+
+  // ---- Detail lists behind each Users Overview stat card ----
+
+  async getNormalStartUsersList(limit = 100) {
+    const { data, error } = await supabase
+      .from('users')
+      .select('user_id, name, username, balance, joined_date')
+      .is('inviter_id', null)
+      .order('joined_date', { ascending: false })
+      .limit(limit)
+
+    if (error) throw error
+    return data || []
+  },
+
+  async getReferralJoinedUsersList(limit = 100) {
+    const { data, error } = await supabase
+      .from('users')
+      .select('user_id, name, username, balance, joined_date, inviter_id')
+      .not('inviter_id', 'is', null)
+      .order('joined_date', { ascending: false })
+      .limit(limit)
+
+    if (error) throw error
+    return data || []
+  },
+
+  async getCompletedWithdrawalsList(limit = 100) {
+    const { data, error } = await supabase
+      .from('withdrawals')
+      .select('id, amount, method_display, method, updated_at, created_at, users(name, username)')
+      .eq('status', 'completed')
+      .order('updated_at', { ascending: false })
+      .limit(limit)
+
+    if (error) throw error
+    return data || []
+  },
+
+  // The same set of Gemini Pro purchases (by referred users) that
+  // getUsersOverview() counts to approximate totalReferralEarned, listed
+  // out with the per-order bonus amount so the admin can see what makes
+  // up the total.
+  async getReferralEarnedList(limit = 100) {
+    const [{ data, error }, settings] = await Promise.all([
+      supabase
+        .from('orders')
+        .select('id, created_at, price, price_display, users!inner(name, username, inviter_id)')
+        .eq('order_type', 'gemini_pro')
+        .in('status', ['approved', 'completed'])
+        .not('users.inviter_id', 'is', null)
+        .order('created_at', { ascending: false })
+        .limit(limit),
+      this.getSettings(),
+    ])
+
+    if (error) throw error
+    const activeBonusBirr = Number(settings?.referral_active_bonus_birr) || 0
+    return (data || []).map((o) => ({ ...o, bonus: activeBonusBirr }))
+  },
+
+  // ============================================
   // BROADCAST
   // ============================================
 
@@ -724,7 +1009,7 @@ export const api = {
         }
       })
       
-      if (error) throw error
+      if (error) throw describeFunctionError(error)
       return true
     } catch (err) {
       console.error('Failed to notify user:', err)
@@ -794,7 +1079,7 @@ export const api = {
                 keyboard
               }
             })
-            if (fnError) throw fnError
+            if (fnError) throw describeFunctionError(fnError)
           } else {
             let personalizedText = text
               .replace(/{user_name}/g, user.name || 'User')
@@ -809,7 +1094,7 @@ export const api = {
                 keyboard
               }
             })
-            if (fnError) throw fnError
+            if (fnError) throw describeFunctionError(fnError)
           }
           
           sent++
@@ -817,7 +1102,7 @@ export const api = {
           console.error(`Failed to send to user ${user.user_id}:`, error)
           failed++
           if (!firstErrorMessage) {
-            firstErrorMessage = error?.context
+            firstErrorMessage = error?.context?.status !== undefined
               ? `${error.message} (status ${error.context.status})`
               : (error?.message || String(error))
           }
@@ -931,6 +1216,92 @@ export const api = {
         },
         (payload) => {
           callback(payload.new)
+        }
+      )
+      .subscribe()
+  },
+
+  // Fires on any user row update — e.g. the bot crediting a referral
+  // (referral_count/balance), a completed withdrawal, or an admin
+  // editing balance/ban status from the Users panel in another tab.
+  // Lets the dashboard update the Users table and Top Referrers list
+  // live instead of waiting for the 30s auto-refresh.
+  subscribeToUserUpdates(callback) {
+    return supabase
+      .channel('user_updates_channel')
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'users'
+        },
+        (payload) => {
+          cache.invalidatePrefix('users_')
+          callback(payload.new)
+        }
+      )
+      .subscribe()
+  },
+
+  subscribeToWithdrawals(callback) {
+    return supabase
+      .channel('withdrawals_channel')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'withdrawals'
+        },
+        (payload) => {
+          cache.invalidate('users_overview')
+          callback(payload.new)
+        }
+      )
+      .subscribe()
+  },
+
+  subscribeToWithdrawalUpdates(callback) {
+    return supabase
+      .channel('withdrawal_updates_channel')
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'withdrawals'
+        },
+        (payload) => {
+          cache.invalidate('users_overview')
+          callback(payload.new)
+        }
+      )
+      .subscribe()
+  },
+
+  // Fires on any bot_settings row change — prices, referral milestone
+  // step/discount, toggles, etc. Covers edits made from the Telegram
+  // admin wizard (handlers/admin.js, priceConfig.js) so the dashboard
+  // reflects them without a manual refresh.
+  subscribeToSettings(callback) {
+    return supabase
+      .channel('settings_channel')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'bot_settings'
+        },
+        (payload) => {
+          const key = payload.new?.key || payload.old?.key
+          if (key === 'product_prices') {
+            invalidatePriceCaches()
+          } else {
+            cache.invalidate('settings')
+          }
+          callback(payload)
         }
       )
       .subscribe()
