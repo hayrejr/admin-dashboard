@@ -13,6 +13,8 @@ export function AdminProvider({ children }) {
   const [referrers, setReferrers] = useState([])
   const [settings, setSettings] = useState({})
   const [activity, setActivity] = useState([])
+  const [withdrawals, setWithdrawals] = useState([])
+  const [usersOverview, setUsersOverview] = useState(null)
   const [prices, setPrices] = useState({
     gemini: null,
     coursera: null,
@@ -36,6 +38,7 @@ export function AdminProvider({ children }) {
         statsData, usersData, ordersData, pendingData, couponsData, referrersData,
         settingsData, activityData, geminiPrice, premiumPrices, starsPrice,
         courseraPrice, courseraInStock, airtimeData, airtimeVoice,
+        withdrawalsData, usersOverviewData,
       ] = 
         await Promise.all([
           api.getDashboardStats(),
@@ -53,6 +56,8 @@ export function AdminProvider({ children }) {
           api.getCourseraStock(),
           api.getAirtimeDataPrices(),
           api.getAirtimeVoicePrices(),
+          api.getWithdrawals(100, 0),
+          api.getUsersOverview(),
         ])
 
       setStats(statsData)
@@ -63,6 +68,8 @@ export function AdminProvider({ children }) {
       setReferrers(referrersData)
       setSettings(settingsData)
       setActivity(activityData)
+      setWithdrawals(withdrawalsData)
+      setUsersOverview(usersOverviewData)
       setPrices({
         gemini: geminiPrice,
         coursera: courseraPrice,
@@ -125,10 +132,56 @@ export function AdminProvider({ children }) {
     }
   }, [])
 
+  // Stable identity (useCallback) so components that useEffect off it
+  // — like the Users panel's order-history modal — don't refetch on
+  // every AdminProvider re-render (30s auto-refresh, realtime pushes).
+  const getUserOrders = useCallback((userId) => api.getOrdersByUser(userId), [])
+
   const findOrder = useCallback(
     (orderId) => orders.find(o => o.id === orderId) || pendingOrders.find(o => o.id === orderId),
     [orders, pendingOrders]
   )
+
+  const findWithdrawal = useCallback(
+    (withdrawalId) => withdrawals.find(w => w.id === withdrawalId),
+    [withdrawals]
+  )
+
+  // Sends the customer a real Telegram DM confirming what happened to
+  // their withdrawal — mirrors notifyOrderStatus above and the bot's own
+  // notifyUserOfDecision()/notifyUserOfCompletion() (handlers/
+  // adminWithdrawals.js).
+  const notifyWithdrawalStatus = useCallback(async (withdrawal, status, updates = {}, newBalance = null) => {
+    if (!withdrawal?.user_id) return
+
+    const amount = `${Number(withdrawal.amount).toLocaleString()} ETB`
+    let message = null
+
+    if (status === 'completed') {
+      message =
+        `💸 <b>Withdrawal Paid</b> ✅\n\n` +
+        `Withdrawal: #${withdrawal.id}\n` +
+        `Amount: ${amount}\n` +
+        `Method: ${withdrawal.method_display || withdrawal.method || 'N/A'}\n\n` +
+        `Thank you for using our service! 🙏`
+    } else if (status === 'rejected') {
+      const reason = updates.rejection_reason
+      message =
+        `❌ <b>Withdrawal Rejected</b>\n\n` +
+        `Withdrawal: #${withdrawal.id}\n` +
+        `Amount: ${amount}\n` +
+        (reason ? `Reason: ${reason}\n` : '') +
+        (newBalance !== null ? `\n💰 The amount has been refunded — your new balance is ${Number(newBalance).toLocaleString()} ETB.` : '')
+    }
+
+    if (!message) return
+
+    try {
+      await api.notifyUser(withdrawal.user_id, message)
+    } catch (err) {
+      console.error('Failed to notify user of withdrawal status:', err.message)
+    }
+  }, [])
 
   // Price management methods
   const updateGeminiPrice = useCallback(async (price) => {
@@ -253,10 +306,64 @@ export function AdminProvider({ children }) {
       api.getDashboardStats().then(setStats)
     })
 
+    // Keeps the Users table and Top Referrers panel live when the *bot*
+    // changes a user row — e.g. crediting a referral, paying out a
+    // withdrawal, or updating balance from a purchase — without waiting
+    // for the 30s auto-refresh. Also picks up bans/unbans made from a
+    // second admin tab.
+    const userUpdatesSub = api.subscribeToUserUpdates((updatedUser) => {
+      setUsers(prev => prev.map(u => (
+        u.user_id === updatedUser.user_id ? { ...u, ...updatedUser } : u
+      )))
+      setReferrers(prev => {
+        const idx = prev.findIndex(r => r.user_id === updatedUser.user_id)
+        if (idx === -1) return prev
+        const next = [...prev]
+        next[idx] = { ...next[idx], ...updatedUser }
+        return next.sort((a, b) => (b.referral_count || 0) - (a.referral_count || 0))
+      })
+      api.getDashboardStats().then(setStats)
+    })
+
+    // Keeps the Withdrawals panel live when a request comes in or its
+    // status changes (e.g. approved/rejected from a second admin tab).
+    const withdrawalsSub = api.subscribeToWithdrawals((newWithdrawal) => {
+      setWithdrawals(prev => [newWithdrawal, ...prev])
+      setNotifications(prev => [{
+        id: Date.now(),
+        type: 'withdrawal',
+        title: '💸 New Withdrawal',
+        message: `Withdrawal #${newWithdrawal.id} for ${newWithdrawal.amount} ETB`,
+        data: newWithdrawal,
+        read: false,
+        timestamp: new Date().toISOString()
+      }, ...prev])
+    })
+
+    const withdrawalUpdatesSub = api.subscribeToWithdrawalUpdates((updatedWithdrawal) => {
+      setWithdrawals(prev => prev.map(w => w.id === updatedWithdrawal.id ? { ...w, ...updatedWithdrawal } : w))
+    })
+
+    // Keeps Price Management and referral settings (milestone step,
+    // discount %, reward note) live when the *bot's* Telegram admin
+    // wizard changes them, so the dashboard never shows a stale value.
+    const settingsSub = api.subscribeToSettings((payload) => {
+      const key = payload.new?.key || payload.old?.key
+      if (key === 'product_prices') {
+        api.getAllPrices().then((p) => setPrices({ ...p, loading: false }))
+      } else {
+        api.getSettings().then(setSettings)
+      }
+    })
+
     return () => {
       ordersSub.unsubscribe()
       orderUpdatesSub.unsubscribe()
       usersSub.unsubscribe()
+      userUpdatesSub.unsubscribe()
+      withdrawalsSub.unsubscribe()
+      withdrawalUpdatesSub.unsubscribe()
+      settingsSub.unsubscribe()
     }
   }, [])
 
@@ -281,6 +388,8 @@ export function AdminProvider({ children }) {
     settings,
     activity,
     prices,
+    withdrawals,
+    usersOverview,
     loading,
     refreshing,
     error,
@@ -334,6 +443,30 @@ export function AdminProvider({ children }) {
         throw err
       }
     },
+    // Withdrawal management — marks the reserved payout as sent and DMs
+    // the user, or rejects the request and refunds their balance.
+    completeWithdrawal: async (withdrawalId) => {
+      try {
+        const withdrawal = findWithdrawal(withdrawalId)
+        await api.completeWithdrawal(withdrawalId)
+        await notifyWithdrawalStatus(withdrawal, 'completed')
+        await refresh()
+      } catch (err) {
+        setError(`Failed to complete withdrawal: ${err.message}`)
+        throw err
+      }
+    },
+    rejectWithdrawal: async (withdrawalId, reason) => {
+      try {
+        const withdrawal = findWithdrawal(withdrawalId)
+        const { newBalance } = await api.rejectWithdrawal(withdrawalId, reason || null)
+        await notifyWithdrawalStatus(withdrawal, 'rejected', { rejection_reason: reason || null }, newBalance)
+        await refresh()
+      } catch (err) {
+        setError(`Failed to reject withdrawal: ${err.message}`)
+        throw err
+      }
+    },
     createCoupon: async (couponData) => {
       try {
         const newCoupon = await api.createCoupon(couponData)
@@ -360,6 +493,40 @@ export function AdminProvider({ children }) {
     updatePremiumPrice,
     updateStarsPrice,
     updateAirtimePrice,
+    // User management methods — each optimistically patches local
+    // `users` state so the table reflects the change immediately,
+    // rather than waiting on the realtime round-trip.
+    adjustUserBalance: async (userId, newBalance) => {
+      try {
+        const updated = await api.adjustUserBalance(userId, newBalance)
+        setUsers(prev => prev.map(u => u.user_id === userId ? { ...u, ...updated } : u))
+        return updated
+      } catch (err) {
+        setError(`Failed to update balance: ${err.message}`)
+        throw err
+      }
+    },
+    banUser: async (userId, reason) => {
+      try {
+        const updated = await api.banUser(userId, reason)
+        setUsers(prev => prev.map(u => u.user_id === userId ? { ...u, ...updated } : u))
+        return updated
+      } catch (err) {
+        setError(`Failed to ban user: ${err.message}`)
+        throw err
+      }
+    },
+    unbanUser: async (userId) => {
+      try {
+        const updated = await api.unbanUser(userId)
+        setUsers(prev => prev.map(u => u.user_id === userId ? { ...u, ...updated } : u))
+        return updated
+      } catch (err) {
+        setError(`Failed to unban user: ${err.message}`)
+        throw err
+      }
+    },
+    getUserOrders,
     markNotificationRead: (id) => {
       setNotifications(prev => prev.map(n => 
         n.id === id ? { ...n, read: true } : n
